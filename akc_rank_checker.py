@@ -574,7 +574,7 @@ def main():
     warm_up_browser(driver)
     
     results_rows: list[dict] = []
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     try:
         for term in terms:
