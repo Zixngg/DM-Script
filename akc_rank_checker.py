@@ -10,6 +10,7 @@ import time
 import random
 import os
 import re
+import requests, json
 
 # ========== CONFIGURATION ==========
 INPUT_EXCEL = 'Book1.xlsx'  # first column contains search terms
@@ -18,6 +19,7 @@ PAGE_READY_TIMEOUT_SECONDS = 10
 GOOGLE_RESULTS_PAGES = 3  # 1 page = top 10, 2 pages = top 20, etc.
 RESULTS_PER_PAGE = 10
 VERBOSE = False  # Toggle detailed [DEBUG] logs
+GOOGLE_SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyL_9WQaby13L-iuTRXKHn5ZWtZyQ1RPFDyplqhvJ0gJ4iOsTNsQehrZVCxN-U5FQGh4Q/exec"  # Replace with your URL
 
 # Domain(s) to detect as the AKC site
 TARGET_DOMAINS = ['sg-akc.com']
@@ -478,21 +480,27 @@ def google_search_collect_results(driver, query: str, pages: int) -> list[str]:
     return collected_urls
 
 
-def find_rank_for_query(driver, query: str, pages: int) -> int | None:
+def find_rank_for_query(driver, query: str, pages: int):
     urls = google_search_collect_results(driver, query, pages)
-    if VERBOSE: print(f"\n[DEBUG] Query: '{query}'")
-    if VERBOSE: print(f"[DEBUG] Found {len(urls)} URLs:")
-    for idx, url in enumerate(urls[:10], 1):  # Show first 10
-        domain = get_base_domain(url)
-        is_match = is_target_domain(url)
-        if VERBOSE: print(f"  {idx}. {domain} -> {url[:80]}... {'✓ MATCH' if is_match else ''}")
     
+    # Extract top 3 company domains
+    top3_domains = []
+    for url in urls[:3]:
+        domain = get_base_domain(url)
+        if domain:
+            top3_domains.append(domain)
+    top3_str = ', '.join(top3_domains) if top3_domains else 'N/A'
+
+    # Find AKC rank and page
     for index, url in enumerate(urls, start=1):
         if is_target_domain(url):
-            print(f"[INFO] Found AKC at rank {index}")
-            return index
-    if VERBOSE: print(f"[DEBUG] AKC not found in {len(urls)} results")
-    return None
+            rank = index
+            page = (rank - 1) // 10 + 1
+            print(f"[INFO] Found AKC at rank {rank} (Page {page})")
+            return rank, page, top3_str
+
+    print(f"[INFO] AKC not found in top {pages * 10} results")
+    return None, None, top3_str
 
 
 def read_search_terms_from_excel(path: str) -> list[str]:
@@ -502,64 +510,23 @@ def read_search_terms_from_excel(path: str) -> list[str]:
     return df.iloc[:, 0].dropna().astype(str).tolist()
 
 
-def write_results_to_excel(path: str, rows: list[dict]):
-    # Append-or-create sheet `AKC Rankings`
+def write_results_to_google_sheets(rows):
     if not rows:
+        print("[WARN] No data to send to Google Sheets.")
         return
 
-    # Try to read existing file, if permission error, create new file
     try:
-        import openpyxl
-        from openpyxl import load_workbook
-        
-        # Try to load existing workbook
-        try:
-            wb = load_workbook(path)
-        except PermissionError:
-            print(f"[WARN] Cannot open {path} - file may be open in Excel.")
-            print(f"[WARN] Creating backup file: {path.replace('.xlsx', '_rankings.xlsx')}")
-            # Create new file with just rankings
-            output_path = path.replace('.xlsx', '_rankings.xlsx')
-            new_df = pd.DataFrame(rows, columns=['Search term', 'Results Ranking', 'Date'])
-            new_df.to_excel(output_path, sheet_name=OUTPUT_SHEET_NAME, index=False, engine='openpyxl')
-            print(f"[INFO] Results saved to {output_path}")
-            return
-        
-        # Read existing sheet if it exists
-        try:
-            existing = pd.read_excel(path, sheet_name=OUTPUT_SHEET_NAME)
-        except Exception:
-            existing = pd.DataFrame()
-
-        # Combine with new data
-        new_df = pd.DataFrame(rows, columns=['Search term', 'Results Ranking', 'Date'])
-        combined = pd.concat([existing, new_df], ignore_index=True)
-        
-        # Remove old sheet and write new one
-        if OUTPUT_SHEET_NAME in wb.sheetnames:
-            wb.remove(wb[OUTPUT_SHEET_NAME])
-        
-        # Create new sheet
-        ws = wb.create_sheet(OUTPUT_SHEET_NAME)
-        
-        # Write headers
-        ws.append(['Search term', 'Results Ranking', 'Date'])
-        
-        # Write data
-        for _, row in combined.iterrows():
-            ws.append([row['Search term'], row['Results Ranking'], row['Date']])
-        
-        wb.save(path)
-        wb.close()
-        print(f"[INFO] Results saved to sheet '{OUTPUT_SHEET_NAME}' in {path}")
-        
+        response = requests.post(
+            GOOGLE_SHEET_WEBHOOK_URL,
+            data=json.dumps(rows),
+            headers={'Content-Type': 'application/json'}
+        )
+        if response.status_code == 200:
+            print("[INFO] Successfully wrote data to Google Sheets.")
+        else:
+            print(f"[ERROR] Google Sheets returned {response.status_code}: {response.text}")
     except Exception as e:
-        print(f"[ERROR] Failed to write to Excel: {e}")
-        # Fallback: create CSV
-        csv_path = path.replace('.xlsx', '_rankings.csv')
-        new_df = pd.DataFrame(rows, columns=['Search term', 'Results Ranking', 'Date'])
-        new_df.to_csv(csv_path, index=False)
-        print(f"[INFO] Results saved to CSV: {csv_path}")
+        print(f"[ERROR] Failed to write to Google Sheets: {e}")
 
 
 def main():
@@ -578,10 +545,12 @@ def main():
 
     try:
         for term in terms:
-            rank = find_rank_for_query(driver, term, GOOGLE_RESULTS_PAGES)
+            rank, page, top3 = find_rank_for_query(driver, term, GOOGLE_RESULTS_PAGES)
             results_rows.append({
                 'Search term': term,
                 'Results Ranking': rank if rank is not None else 'Not Found',
+                'Page No.': page if page is not None else 'N/A',
+                'Top 3 Companies': top3,
                 'Date': today,
             })
             # longer human-like pause between searches to avoid detection
@@ -594,7 +563,7 @@ def main():
         except Exception:
             pass
 
-    write_results_to_excel(INPUT_EXCEL, results_rows)
+    write_results_to_google_sheets(results_rows)
     print(f"Wrote {len(results_rows)} rows to sheet '{OUTPUT_SHEET_NAME}' in {INPUT_EXCEL}")
 
 
