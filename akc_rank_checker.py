@@ -15,7 +15,7 @@ import re
 INPUT_EXCEL = 'Book1.xlsx'  # first column contains search terms
 OUTPUT_SHEET_NAME = 'AKC Rankings'  # results sheet inside INPUT_EXCEL
 PAGE_READY_TIMEOUT_SECONDS = 10
-GOOGLE_RESULTS_PAGES = 1  # 1 page = top 10, 2 pages = top 20, etc.
+GOOGLE_RESULTS_PAGES = 3  # 1 page = top 10, 2 pages = top 20, etc.
 RESULTS_PER_PAGE = 10
 VERBOSE = False  # Toggle detailed [DEBUG] logs
 
@@ -27,14 +27,29 @@ def setup_driver():
     # Use undetected-chromedriver by default to avoid Google detection
     try:
         options = uc.ChromeOptions()
+        # Keep essential flags but remove some that trigger detection
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
+        # Remove --disable-gpu as it can trigger detection
         # Add user agent to appear more human-like
         options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        # Add language preferences
+        options.add_argument('--lang=en-US,en;q=0.9')
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
         uc.Chrome.__del__ = lambda self: None
-        driver = uc.Chrome(options=options)
+        driver = uc.Chrome(options=options, version_main=None)
         driver.maximize_window()
+        
+        # Execute stealth scripts to avoid detection
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': '''
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+            '''
+        })
+        
         if VERBOSE: print("[DEBUG] Using undetected-chromedriver")
         return driver
     except Exception as e:
@@ -43,7 +58,6 @@ def setup_driver():
         options = webdriver.ChromeOptions()
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
         driver = webdriver.Chrome(options=options)
         driver.maximize_window()
         return driver
@@ -114,6 +128,19 @@ def _normalize_google_result_href(href: str) -> str:
         return href
     except Exception:
         return href
+
+
+def warm_up_browser(driver):
+    """Visit Google homepage first to establish a normal browsing session"""
+    try:
+        print("[INFO] Warming up browser - visiting Google homepage...")
+        driver.get("https://www.google.com")
+        wait_until_ready(driver)
+        # Small delay to appear human
+        time.sleep(random.uniform(2.0, 4.0))
+        print("[INFO] Browser warmed up successfully")
+    except Exception as e:
+        if VERBOSE: print(f"[DEBUG] Error warming up browser: {e}")
 
 
 def google_search_collect_results(driver, query: str, pages: int) -> list[str]:
@@ -542,8 +569,12 @@ def main():
         return
 
     driver = setup_driver()
+    
+    # Warm up the browser by visiting Google homepage first
+    warm_up_browser(driver)
+    
     results_rows: list[dict] = []
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     try:
         for term in terms:
@@ -553,8 +584,10 @@ def main():
                 'Results Ranking': rank if rank is not None else 'Not Found',
                 'Date': today,
             })
-            # small human-like pause
-            time.sleep(random.uniform(1.0, 2.0))
+            # longer human-like pause between searches to avoid detection
+            delay = random.uniform(3.0, 6.0)
+            if VERBOSE: print(f"[DEBUG] Waiting {delay:.1f} seconds before next search...")
+            time.sleep(delay)
     finally:
         try:
             driver.quit()
